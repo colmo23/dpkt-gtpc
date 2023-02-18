@@ -22,6 +22,9 @@ from binascii import hexlify as hx
 # Charging Data Record (CDR) transfer
 # https://www.3gpp.org/DynaReport/32295.htm
 
+# original source is https://github.com/wmnsk/dpkt/tree/gtpc_implementation
+# https://github.com/wmnsk/dpkt/blob/gtpc_implementation/dpkt/gtp_c.py
+
 # GTPv1 Message Types
 V1_UNKNOWN = 0
 V1_ECHO_REQ = 1
