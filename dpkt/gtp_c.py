@@ -3,6 +3,7 @@
 
 from __future__ import absolute_import
 
+import socket
 import struct
 
 from . import dpkt
@@ -703,6 +704,105 @@ class IEv2(dpkt.Packet):
     def pack_hdr(self):
         self.len = len(self.data)
         return dpkt.Packet.pack_hdr(self)
+
+
+# F-TEID Interface Types (3GPP TS 29.274 Table 8.22-1)
+FTEID_S1U_ENB          =  0   # S1-U eNodeB GTP-U
+FTEID_S1U_SGW          =  1   # S1-U SGW GTP-U
+FTEID_S12_RNC          =  2   # S12 RNC GTP-U
+FTEID_S12_SGW          =  3   # S12 SGW GTP-U
+FTEID_S5S8_SGW_GTPU    =  4   # S5/S8 SGW GTP-U
+FTEID_S5S8_PGW_GTPU    =  5   # S5/S8 PGW GTP-U
+FTEID_S5S8_SGW_GTPC    =  6   # S5/S8 SGW GTP-C
+FTEID_S5S8_PGW_GTPC    =  7   # S5/S8 PGW GTP-C
+FTEID_S5S8_SGW_PMIPv6  =  8   # S5/S8 SGW PMIPv6
+FTEID_S5S8_PGW_PMIPv6  =  9   # S5/S8 PGW PMIPv6
+FTEID_S11_MME          = 10   # S11 MME GTP-C
+FTEID_S11S4_SGW        = 11   # S11/S4 SGW GTP-C
+FTEID_S10_MME          = 12   # S10 MME GTP-C
+FTEID_S3_MME           = 13   # S3 MME GTP-C
+FTEID_S3_SGSN          = 14   # S3 SGSN GTP-C
+FTEID_S4_SGSN_GTPU     = 15   # S4 SGSN GTP-U
+FTEID_S4_SGW_GTPU      = 16   # S4 SGW GTP-U
+FTEID_S4_SGSN_GTPC     = 17   # S4 SGSN GTP-C
+FTEID_S16_SGSN         = 18   # S16 SGSN GTP-C
+FTEID_S2B_EPDG_GTPC    = 19   # S2b ePDG GTP-C
+FTEID_S2B_EPDG_GTPU    = 20   # S2b-U ePDG GTP-U
+FTEID_S2B_PGW_GTPC     = 21   # S2b PGW GTP-C
+FTEID_S2B_PGW_GTPU     = 22   # S2b-U PGW GTP-U
+
+
+def encode_fteid(teid, interface_type, ipv4=None, ipv6=None):
+    """Encode an F-TEID (Fully Qualified TEID) value field for use as IEv2 data.
+
+    Layout (3GPP TS 29.274 §8.22):
+        1 byte  : flags — bit7=V4, bit6=V6, bits5-0=interface type
+        4 bytes : TEID
+        4 bytes : IPv4 address  (only if ipv4 is given)
+       16 bytes : IPv6 address  (only if ipv6 is given)
+
+    Args:
+        teid           : 32-bit tunnel endpoint identifier (int)
+        interface_type : interface type constant (e.g. FTEID_S11_MME)
+        ipv4           : IPv4 address string, e.g. '10.0.0.1' (optional)
+        ipv6           : IPv6 address string, e.g. '2001:db8::1' (optional)
+
+    Returns:
+        bytes suitable for use as the data field of an F-TEID IEv2
+    """
+    if ipv4 is None and ipv6 is None:
+        raise ValueError('at least one of ipv4 or ipv6 must be provided')
+
+    flags = (interface_type & 0x3f)
+    if ipv4:
+        flags |= 0x80
+    if ipv6:
+        flags |= 0x40
+
+    data = struct.pack('!BI', flags, teid)
+    if ipv4:
+        data += socket.inet_aton(ipv4)
+    if ipv6:
+        data += socket.inet_pton(socket.AF_INET6, ipv6)
+    return data
+
+
+def decode_fteid(data):
+    """Decode F-TEID value bytes into a dict.
+
+    Args:
+        data : bytes from an F-TEID IEv2's data field
+
+    Returns:
+        dict with keys:
+            'interface_type' : int
+            'teid'           : int
+            'ipv4'           : str  (present only if V4 flag set)
+            'ipv6'           : str  (present only if V6 flag set)
+    """
+    if len(data) < 5:
+        raise dpkt.UnpackError('F-TEID too short: %d bytes' % len(data))
+
+    flags, teid = struct.unpack('!BI', data[:5])
+    v4 = bool(flags & 0x80)
+    v6 = bool(flags & 0x40)
+    interface_type = flags & 0x3f
+    offset = 5
+
+    result = {'interface_type': interface_type, 'teid': teid}
+
+    if v4:
+        if len(data) < offset + 4:
+            raise dpkt.UnpackError('F-TEID truncated: missing IPv4 address')
+        result['ipv4'] = socket.inet_ntoa(data[offset:offset + 4])
+        offset += 4
+
+    if v6:
+        if len(data) < offset + 16:
+            raise dpkt.UnpackError('F-TEID truncated: missing IPv6 address')
+        result['ipv6'] = socket.inet_ntop(socket.AF_INET6, data[offset:offset + 16])
+
+    return result
 
 
 __v1c_payloads = [

@@ -6,7 +6,6 @@ them as hex dumps.
 GTPv1-C (3GPP TS 29.060) is used across the Gn/Gp interfaces between SGSN and GGSN.
 GTPv2-C (3GPP TS 29.274) is used on the S5/S8/S11 interfaces in EPC (LTE).
 """
-import binascii
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -21,6 +20,8 @@ from dpkt.gtp_c import (
     TV_IMSI, TV_TEID_DATA_1, TV_TEID_C_PLANE, TV_NSAPI, TV_RECOVERY,
     GTPV2_IE_IMSI, GTPV2_IE_APN, GTPV2_IE_F_TEID, GTPV2_IE_RAT_TYPE,
     GTPV2_IE_PDN_TYPE, GTPV2_IE_CAUSE,
+    FTEID_S11_MME, FTEID_S11S4_SGW,
+    encode_fteid, decode_fteid,
 )
 from dpkt import hexdump
 
@@ -46,7 +47,7 @@ def encode_imsi(imsi_str):
 
 
 # ---------------------------------------------------------------------------
-# Helper: encode an APN string into GTPv1 label-encoded format
+# Helper: encode an APN string into length-prefixed label bytes
 # ---------------------------------------------------------------------------
 def encode_apn(apn_str):
     """Encode a dotted APN string into length-prefixed label bytes.
@@ -68,11 +69,11 @@ def make_v1_create_pdp_request():
     Fixed header: flags | type | len | TEID
     Optional fields: seqnum | N-PDU | next ext header type
     IEs (TV/TLV):
-        IMSI (type 2,  8 bytes, TV)
-        TEID Data I (type 16, 4 bytes, TV)
+        IMSI       (type 2,    8 bytes, TV)
+        TEID Data I (type 16,  4 bytes, TV)
         TEID C-Plane (type 17, 4 bytes, TV)
-        NSAPI (type 20, 1 byte,  TV)
-        APN   (type 0x83, TLV)
+        NSAPI      (type 20,   1 byte,  TV)
+        APN        (type 0x83, TLV)
     """
     pkt = GTPv1C(
         version=1,
@@ -90,11 +91,11 @@ def make_v1_create_pdp_request():
     imsi_bytes = encode_imsi('001011234567890')  # MCC=001 MNC=01 MSIN=1234567890
 
     pkt.data = [
-        IEv1(type=TV_IMSI,       data=imsi_bytes),          # IMSI
-        IEv1(type=TV_TEID_DATA_1, data=b'\x00\x00\x56\x78'), # TEID Data I
-        IEv1(type=TV_TEID_C_PLANE, data=b'\x00\x00\x12\x34'),# TEID C-Plane
-        IEv1(type=TV_NSAPI,      data=b'\x05'),              # NSAPI=5
-        IEv1(type=0x83,          data=encode_apn('internet.operator.net')),  # APN
+        IEv1(type=TV_IMSI,        data=imsi_bytes),
+        IEv1(type=TV_TEID_DATA_1, data=b'\x00\x00\x56\x78'),
+        IEv1(type=TV_TEID_C_PLANE, data=b'\x00\x00\x12\x34'),
+        IEv1(type=TV_NSAPI,       data=b'\x05'),               # NSAPI=5
+        IEv1(type=0x83,           data=encode_apn('internet.operator.net')),
     ]
 
     return pkt
@@ -156,7 +157,7 @@ def make_v2_create_session_request():
         RAT Type     (type 82) — 6 = EUTRAN
         APN          (type 71)
         PDN Type     (type 99) — 1 = IPv4
-        F-TEID       (type 87) — sender's control-plane TEID + IPv4
+        F-TEID       (type 87) — S11 MME GTP-C interface, IPv4
     """
     pkt = GTPv2C(
         version=2,
@@ -169,16 +170,15 @@ def make_v2_create_session_request():
 
     imsi_bytes = encode_imsi('001011234567890')
 
-    # F-TEID value: 1-byte flags (interface type + V4 bit) + 4-byte TEID + 4-byte IPv4
-    # Interface type 10 (S11 MME GTP-C) | bit7=1 (IPv4 present) => 0x8a
-    fteid_value = b'\x8a' + b'\x00\x00\xab\xcd' + b'\x0a\x00\x00\x01'  # 10.0.0.1
-
     pkt.data = [
         IEv2(type=GTPV2_IE_IMSI,     instance=0, data=imsi_bytes),
         IEv2(type=GTPV2_IE_RAT_TYPE, instance=0, data=b'\x06'),     # EUTRAN
         IEv2(type=GTPV2_IE_APN,      instance=0, data=encode_apn('internet.operator.net')),
         IEv2(type=GTPV2_IE_PDN_TYPE, instance=0, data=b'\x01'),     # IPv4
-        IEv2(type=GTPV2_IE_F_TEID,   instance=0, data=fteid_value),
+        IEv2(type=GTPV2_IE_F_TEID,   instance=0,
+             data=encode_fteid(teid=0x0000abcd,
+                               interface_type=FTEID_S11_MME,
+                               ipv4='10.0.0.1')),
     ]
 
     return pkt
@@ -220,11 +220,18 @@ def main():
         print(f'=== {title} ({len(raw)} bytes) ===')
         print(hexdump(raw))
         print()
-    for title, pkt in messages:
-        raw = bytes(pkt)
-        print(f'=== {title} ({len(raw)} bytes) ===')
-        print(binascii.b2a_hex(raw))
-        print()
+
+    # Demonstrate F-TEID encode/decode round-trip
+    print('=== F-TEID encode/decode round-trip ===')
+    for label, kwargs in [
+        ('IPv4 only',       dict(teid=0xdeadbeef, interface_type=FTEID_S11_MME,   ipv4='192.168.1.1')),
+        ('IPv6 only',       dict(teid=0x00001234, interface_type=FTEID_S11S4_SGW, ipv6='2001:db8::1')),
+        ('dual-stack',      dict(teid=0xaabbccdd, interface_type=FTEID_S11_MME,
+                                 ipv4='10.0.0.2', ipv6='2001:db8::2')),
+    ]:
+        raw = encode_fteid(**kwargs)
+        parsed = decode_fteid(raw)
+        print(f'  {label}: {raw.hex()}  ->  {parsed}')
 
 
 if __name__ == '__main__':
