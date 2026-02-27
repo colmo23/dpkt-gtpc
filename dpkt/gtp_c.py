@@ -49,7 +49,7 @@ V1_PDU_NOTIFICATION_REJECT_REQ = 29
 V1_PDU_NOTIFICATION_REJECT_RES = 30
 V1_SUPPORTED_EXT_HEADER_NOTIFY = 31
 V1_SEND_ROUTING_INFO_GPRS = 32
-V1_SEND_ROUTING_INFO_GPRS = 33
+V1_SEND_ROUTING_INFO_GPRS_RES = 33
 V1_FAILURE_REPORT_REQ = 34
 V1_FAILURE_REPORT_RES = 35
 V1_NOTE_MS_GPRS_PRESENT_REQ = 36
@@ -197,8 +197,8 @@ V2_CREATE_BEARER_REQ = 95
 V2_CREATE_BEARER_RES = 96
 V2_UPDATE_BEARER_REQ = 97
 V2_UPDATE_BEARER_RES = 98
-V2_MODIFY_BEARER_REQ = 99
-V2_MODIFY_BEARER_RES = 100
+V2_DELETE_BEARER_REQ = 99
+V2_DELETE_BEARER_RES = 100
 V2_DELETE_PDN_CONN_SET_REQ = 101
 V2_DELETE_PDN_CONN_SET_RES = 102
 V2_PGW_DL_TRIGGER_NOTIFY = 103
@@ -211,7 +211,7 @@ V2_CONTEXT_ACK = 132
 V2_FORWARD_RELOC_REQ = 133
 V2_FORWARD_RELOC_RES = 134
 V2_FORWARD_RELOC_COMPLETE_REQ = 135
-V2_FORWARD_RELOC_COMPLETE_REQ = 136
+V2_FORWARD_RELOC_COMPLETE_ACK = 136
 V2_FORWARD_ACCESS_CONTEXT_NOTIFY = 137
 V2_FORWARD_ACCESS_CONTEXT_ACK = 138
 V2_RELOC_CANCEL_REQ = 139
@@ -231,7 +231,7 @@ V2_UE_REGIST_QUERY_RES = 159
 V2_CREATE_FORWARDING_TUNNEL_REQ = 160
 V2_CREATE_FORWARDING_TUNNEL_RES = 161
 V2_SUSPEND_NOTIFY = 162
-V2_SUSPEND_NOTIFY = 163
+V2_SUSPEND_ACK = 163
 V2_RESUME_NOTIFY = 164
 V2_RESUME_ACK = 165
 V2_CREATE_INDIRECT_DATA_FORWARDING_TUNNEL_REQ = 166
@@ -508,7 +508,6 @@ class GTPv1C(dpkt.Packet):
             )
             self.npdu = struct.pack('B', self.npdu & 0xff)
             self.next_type = struct.pack('B', self.next_type & 0xff)
-            data = self.seqnum + self.npdu + self.next_type + data
         else:
             self.seqnum = b''
             self.npdu = b''
@@ -519,9 +518,7 @@ class GTPv1C(dpkt.Packet):
 
         return dpkt.Packet.pack_hdr(self)
     def __bytes__(self):
-        ie_bytes = []
-        [ie_bytes.append(bytes(ie)) for ie in self.ies]
-        return self.pack_hdr() + b''.join(ie_bytes)
+        return self.pack_hdr() + bytes(self.data)
 
 
 class GTPv2C(dpkt.Packet):
@@ -620,9 +617,7 @@ class GTPv2C(dpkt.Packet):
             self.len = len(self.data)
             return dpkt.Packet.pack_hdr(self)
     def __bytes__(self):
-        ie_bytes = []
-        [ie_bytes.append(bytes(ie)) for ie in self.ies]
-        return self.pack_hdr() + b''.join(ie_bytes)
+        return self.pack_hdr() + bytes(self.data)
 
 
 class IEv1(dpkt.Packet):
@@ -651,13 +646,16 @@ class IEv1(dpkt.Packet):
             self.data = self.data[2:2+self.len]
         else:
             self.len = TV_LEN_DICT.get(self.type)
+            if self.len is None:
+                raise dpkt.UnpackError('unknown GTPv1 TV IE type: 0x%02x' % self.type)
             self.data = self.data[:self.len]
 
     def pack_hdr(self):
         data = dpkt.Packet.pack_hdr(self)
         if self.encoding:
+            self.len = len(self.data)
             packed_len = struct.pack('!H', self.len)
-            data =  data + packed_len
+            data = data + packed_len
 
         return data
     def __len__(self):
@@ -688,7 +686,7 @@ class IEv2(dpkt.Packet):
 
     @cr_flag.setter
     def cr_flag(self, c):
-        pass
+        self.flags = (self.flags & 0x0f) | ((c & 0xf) << 4)
 
     @property
     def instance(self):
@@ -696,7 +694,7 @@ class IEv2(dpkt.Packet):
 
     @instance.setter
     def instance(self, c):
-        pass
+        self.flags = (self.flags & 0xf0) | (c & 0xf)
 
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
@@ -708,9 +706,9 @@ class IEv2(dpkt.Packet):
 
 
 __v1c_payloads = [
-    b'2\x10\x00%\x00\x00\x00\x10\x00\n\xca\xfe', # Header
-    b'\x01\x00\x08\x00D\x90\x01\x12#4E\xf5', #IMSI
-    b'G\x00\x11\x00some.operator.net' # APN
+    b'2\x10\x00!\x00\x00\x00\x10\x00\n\xca\xfe', # Header + additionals (len=33)
+    b'\x02D\x90\x01\x12#4E\xf5',                 # IMSI (TV type=2, 8 bytes)
+    b'\x83\x00\x11some.operator.net'              # APN  (TLV type=0x83, len=17)
 ]
 
 __v1c = b''.join(__v1c_payloads)
@@ -755,24 +753,20 @@ def test_unpack():
     assert (v1c.s_flag == 1)
     assert (v1c.np_flag == 0)
     assert (v1c.type == V1_CREATE_PDP_CXT_REQ)
-    assert (v1c.len == 37)
+    assert (v1c.len == 33)
     assert (v1c.teid == 0x00000010)
     assert (v1c.seqnum == 0x000a)
     assert (v1c.npdu == 0xca)
     assert (v1c.next_type == 0xfe)
 
     imsi = v1c.ies[0]
-    assert (imsi.type == 1)
+    assert (imsi.type == TV_IMSI)  # 2
     assert (imsi.len == 8)
-    assert (imsi.cr_flag == 0)
-    assert (imsi.instance == 0)
     assert (imsi.data == b'D\x90\x01\x12#4E\xf5')
 
     apn = v1c.ies[1]
-    assert (apn.type == 71)
+    assert (apn.type == 0x83)      # TLV APN
     assert (apn.len == 17)
-    assert (apn.cr_flag == 0)
-    assert (apn.instance == 0)
     assert (apn.data == b'some.operator.net')
 
 def test_pack():
@@ -798,23 +792,18 @@ def test_pack():
         seqnum=0x01000a
         )
 
-    infoelems = [
-        IEv2(
-            type=1,
-            cr_flag=0,
-            instance=0,
-            data=b'D\x90\x01\x12#4E\xf5'
-        ),
-        IEv2(
-            type=71,
-            cr_flag=0,
-            instance=0,
-            data=b'some.operator.net'
-        )
+    v1c_ies = [
+        IEv1(type=TV_IMSI, data=b'D\x90\x01\x12#4E\xf5'),
+        IEv1(type=0x83,    data=b'some.operator.net'),
     ]
 
-    v1c.data = infoelems
+    v2c_ies = [
+        IEv2(type=1,  cr_flag=0, instance=0, data=b'D\x90\x01\x12#4E\xf5'),
+        IEv2(type=71, cr_flag=0, instance=0, data=b'some.operator.net'),
+    ]
+
+    v1c.data = v1c_ies
     assert (bytes(v1c) == __v1c)
 
-    v2c.data = infoelems
+    v2c.data = v2c_ies
     assert (bytes(v2c) == __v2c)
