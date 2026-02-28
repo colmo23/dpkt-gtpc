@@ -582,8 +582,12 @@ class GTPv2C(dpkt.Packet):
             self.priority = (compat_ord(self.data[7]) >> 4) & 0xf
             self.data = self.data[8:]
         else:
-            self.seqnum = self.data[:3]
-            self.data = self.data[5:]
+            self.seqnum = (
+                (compat_ord(self.data[0]) << 16) |
+                (compat_ord(self.data[1]) << 8) |
+                (compat_ord(self.data[2]))
+            )
+            self.data = self.data[4:]
 
         l = []
         while self.data:
