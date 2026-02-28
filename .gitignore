@@ -1,3 +1,5 @@
+examples/data
+
 # Compiled/intermediate Python files
 *.py[cod]
 
